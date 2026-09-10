@@ -6,29 +6,37 @@
 
 ### 直接使用（推荐，零依赖）
 
-**方式一：仓库里直接拿（无需任何工具）**
+**方式一：在线版 —— 点开就用**
+
+👉 <https://splexuan.github.io/wechat-html-editor/>
+
+不用下载、不用安装，浏览器打开即可使用。文章仍然只在你本机处理，不会上传。
+
+> 若该链接暂时打不开：仓库需先在 `Settings → Pages` 里把 Source 设为 `gh-pages` 分支的 `/ (root)`，启用后即可访问。
+
+**方式二：下载单文件（离线可用）**
 
 构建好的单文件已经提交在仓库里，两种取法：
 
 - **下载**：打开 [`dist/index.html`](dist/index.html)，点右上角的下载按钮（或 Raw）保存到本地
 - **克隆**：`git clone git@github.com:splexuan/wechat-html-editor.git`，产物就在 `dist/index.html`
 
-然后**双击打开**即可使用。
+然后**双击打开**即可使用，适合离线使用或直接分发给别人。
 
-> 如果你拿到的是源码压缩包，也可以在 `dist/` 目录里找到这个 html。仓库根目录另有 `index.html` 作为源码入口，**不要直接打开它**（那是开发用的，需要构建）。
+- **不需要安装 Node.js** 即可使用（只有自己构建时才需要）
+- 不需要联网，不需要命令行
+- 整个应用（界面、样式、全部逻辑）都在一个约 340 KB 的 HTML 文件里
+- 可以直接拷到 U 盘或发给别人，双击就能打开
 
-**方式二：自己构建**
+> ⚠️ 仓库根目录的 `index.html` 是**开发入口**，引用的是源码，直接打开会白屏 —— 请用 `dist/index.html`。
+
+### 自己构建
 
 ```powershell
 npm install
 npm run build
 # 产物：dist/index.html
 ```
-
-- **不需要安装 Node.js** 即可使用（只有自己构建时才需要）
-- 不需要联网，不需要命令行
-- 整个应用（界面、样式、全部逻辑）都在一个约 330 KB 的 HTML 文件里
-- 可以直接拷到 U 盘或发给别人，双击就能打开
 
 ### 开发模式（需要 Node.js 20.19+）
 
@@ -153,6 +161,7 @@ npm run build       # 构建单文件产物到 dist/
 npm run typecheck   # TypeScript 类型检查
 npm run verify      # 产物结构断言（无需浏览器，会随 build 一起回归）
 npm run verify:parity  # 「按钮复制 vs 手动全选复制」产物一致性回归（需 playwright，未装则自动跳过）
+npm run publish:pages  # 把 dist 产物发布到 gh-pages 分支，更新在线版
 ```
 
 ## 打不开怎么办
