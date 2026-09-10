@@ -9,7 +9,11 @@
 !.yarn/versions
 
 # build output
-/dist/
+# 有意提交单文件产物 dist/index.html：
+# 它是本项目的**唯一用户交付物**，提交后别人 clone / 下载即可双击使用，
+# 无需安装 Node、无需构建。其余构建中间产物仍忽略。
+/dist/*
+!/dist/index.html
 /dist-ssr/
 
 # vite cache

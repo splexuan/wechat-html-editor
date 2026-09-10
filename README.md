@@ -6,12 +6,29 @@
 
 ### 直接使用（推荐，零依赖）
 
-双击 `dist\index.html`。
+**方式一：仓库里直接拿（无需任何工具）**
 
-- **不需要安装 Node.js**，不需要联网，不需要命令行
-- 整个应用（界面、样式、全部逻辑）都在一个约 320 KB 的 HTML 文件里
+构建好的单文件已经提交在仓库里，两种取法：
+
+- **下载**：打开 [`dist/index.html`](dist/index.html)，点右上角的下载按钮（或 Raw）保存到本地
+- **克隆**：`git clone git@github.com:splexuan/wechat-html-editor.git`，产物就在 `dist/index.html`
+
+然后**双击打开**即可使用。
+
+> 如果你拿到的是源码压缩包，也可以在 `dist/` 目录里找到这个 html。仓库根目录另有 `index.html` 作为源码入口，**不要直接打开它**（那是开发用的，需要构建）。
+
+**方式二：自己构建**
+
+```powershell
+npm install
+npm run build
+# 产物：dist/index.html
+```
+
+- **不需要安装 Node.js** 即可使用（只有自己构建时才需要）
+- 不需要联网，不需要命令行
+- 整个应用（界面、样式、全部逻辑）都在一个约 330 KB 的 HTML 文件里
 - 可以直接拷到 U 盘或发给别人，双击就能打开
-- 修改源码后执行 `npm run build` 重新生成
 
 ### 开发模式（需要 Node.js 20.19+）
 
