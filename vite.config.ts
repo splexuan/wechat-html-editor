@@ -1,61 +1,30 @@
-import { sites } from '@openai/sites-vite-plugin';
-import tailwindcss from '@tailwindcss/postcss';
-import vinext from 'vinext';
+import tailwindcss from '@tailwindcss/vite';
+import react from '@vitejs/plugin-react';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
-import hostingConfig from './.openai/hosting.json';
+import { viteSingleFile } from 'vite-plugin-singlefile';
 
-const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
-  '00000000-0000-4000-8000-000000000000';
-
-const { d1, r2 } = hostingConfig;
-
-// macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
-const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === 'seatbelt';
-
-const localBindingConfig = {
-  main: 'vinext/server/fetch-handler',
-  compatibility_flags: ['nodejs_compat'],
-  d1_databases: d1
-    ? [
-        {
-          binding: d1,
-          database_name: 'site-creator-d1',
-          database_id: SITE_CREATOR_PLACEHOLDER_DATABASE_ID,
-        },
-      ]
-    : [],
-  r2_buckets: r2
-    ? [
-        {
-          binding: r2,
-          bucket_name: 'site-creator-r2',
-        },
-      ]
-    : [],
-};
-
-export default defineConfig(async () => {
-  // Keep Wrangler and Miniflare state project-local. These are non-secret tool
-  // settings; application environment belongs in ignored `.env*` files.
-  process.env.WRANGLER_WRITE_LOGS ??= 'false';
-  process.env.WRANGLER_LOG_PATH ??= '.wrangler/logs';
-  process.env.MINIFLARE_REGISTRY_PATH ??= '.wrangler/registry';
-
-  // Wrangler snapshots its log path while the Cloudflare plugin is imported.
-  const { cloudflare } = await import('@cloudflare/vite-plugin');
-
-  return {
-    css: { postcss: { plugins: [tailwindcss()] } },
-    server: isCodexSeatbeltSandbox
-      ? { watch: { useFsEvents: false, usePolling: true } }
-      : undefined,
-    plugins: [
-      vinext(),
-      sites(),
-      cloudflare({
-        viteEnvironment: { name: 'rsc', childEnvironments: ['ssr'] },
-        config: localBindingConfig,
-      }),
-    ],
-  };
-});
+export default defineConfig(({ command }) => ({
+  plugins: [
+    react(),
+    tailwindcss(),
+    // 只在构建时启用：把 JS 与 CSS 全部内联进同一个 HTML 文件，
+    // 产物可直接双击打开、离线运行、单独分发。
+    // 开发时保持 Vite 原生行为，热更新不受影响。
+    ...(command === 'build' ? [viteSingleFile({ removeViteModuleLoader: true })] : []),
+  ],
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+    },
+  },
+  server: {
+    host: 'localhost',
+    port: 13580,
+    strictPort: true,
+  },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+  },
+}));

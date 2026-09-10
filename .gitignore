@@ -8,13 +8,18 @@
 !.yarn/releases
 !.yarn/versions
 
+# build output
+/dist/
+/dist-ssr/
+
+# vite cache
+.vite/
+
+# AI agent local memory
+.workbuddy/
+
 # testing
 /coverage
-
-# next.js
-/.next/
-/.vinext/
-/out/
 
 # misc
 .DS_Store
@@ -28,11 +33,9 @@ yarn-error.log*
 
 # local environment
 .env*
+!.env.example
 
-# deployment and generated files
-.vercel
-next-env.d.ts
-/dist/
-/.wrangler/
-/outputs/
-/work/
+# editors
+.idea/
+.vscode/*
+!.vscode/extensions.json

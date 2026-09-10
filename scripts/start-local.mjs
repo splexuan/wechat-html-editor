@@ -4,8 +4,8 @@ const port = 13580;
 const url = `http://localhost:${port}/`;
 const majorVersion = Number.parseInt(process.versions.node.split('.')[0] || '0', 10);
 
-if (majorVersion < 22) {
-  console.error(`Node.js 22 or newer is required. Current version: ${process.version}`);
+if (majorVersion < 20) {
+  console.error(`Node.js 20.19 or newer is required. Current version: ${process.version}`);
   process.exit(1);
 }
 

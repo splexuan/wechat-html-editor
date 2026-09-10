@@ -21,7 +21,7 @@ exit /b 0
 
 :no_node
 echo Node.js was not found.
-echo Install Node.js 22 or newer from https://nodejs.org/
+echo Install Node.js 20.19 or newer from https://nodejs.org/
 pause
 exit /b 1
 

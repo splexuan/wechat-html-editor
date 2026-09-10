@@ -1,5 +1,3 @@
-'use client';
-
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -8,6 +6,33 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 
 const STORAGE_KEY = 'wechat-html-editor-document-v1';
+
+// localStorage 在 file:// 协议（双击打开的单文件版本）或隐私模式下，可能被浏览器
+// 禁用并直接抛异常。这里做一层安全兜底，保证存储不可用时应用照常运行，
+// 只是不再自动保存草稿，而不是整页白屏。
+const safeStorage = {
+  get(key: string): string | null {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  set(key: string, value: string): void {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {
+      // 静默降级：编辑、预览、复制功能不受影响。
+    }
+  },
+  remove(key: string): void {
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // 同上。
+    }
+  },
+};
 
 const STARTER_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -635,7 +660,7 @@ export function EditorWorkspace() {
   const articleTitle = useMemo(() => getDocumentTitle(sourceHtml), [sourceHtml]);
 
   useEffect(() => {
-    const saved = window.localStorage.getItem(STORAGE_KEY);
+    const saved = safeStorage.get(STORAGE_KEY);
     if (saved) {
       setSourceHtml(saved);
       setPreviewHtml(saved);
@@ -818,7 +843,7 @@ export function EditorWorkspace() {
   };
 
   const resetDocument = () => {
-    window.localStorage.removeItem(STORAGE_KEY);
+    safeStorage.remove(STORAGE_KEY);
     setSourceHtml(STARTER_HTML);
     setPreviewHtml(STARTER_HTML);
     setPreviewKey((k) => k + 1);
