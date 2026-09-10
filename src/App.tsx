@@ -260,8 +260,11 @@ function getNumericPixels(value: string) {
 function normaliseTextAlign(value: string) {
   const align = value.trim().toLowerCase();
   if (!align) return '';
-  if (['left', 'right', 'center', 'justify'].includes(align)) return align;
-  if (align === 'justify-all') return 'justify';
+  if (['left', 'right', 'center'].includes(align)) return align;
+  // justify / justify-all：两端对齐在各终端解释不一致（iOS 真两端对齐，安卓与微信编辑器常退化为左对齐，
+  // 中文正文还会出现标点挤压、字距被拉大的空隙），公众号排版校验会将其判为“非标准值”。
+  // 中文正文本身极少需要两端对齐，统一移除，交给默认左对齐，确保多端一致。
+  if (align === 'justify' || align === 'justify-all' || align === 'inter-word' || align === 'inter-character' || align === 'distribute') return '';
   if (/^(start|-webkit-left|-moz-left)$/.test(align)) return 'left';
   if (/^(end|-webkit-right|-moz-right)$/.test(align)) return 'right';
   if (/^(-webkit-center|-moz-center)$/.test(align)) return 'center';
@@ -292,6 +295,7 @@ function validateWechatDocument(doc: Document): ValidationIssue[] {
     if (style.getPropertyValue('font-family')) add('warning', '字体', '检测到自定义 font-family，复制时会移除并使用公众号官方默认字体栈。');
     if (style.getPropertyPriority('color') === 'important' || style.cssText.includes('!important')) add('warning', '!important', '检测到 !important，复制时会移除优先级。');
     if (/^(start|end)$/i.test(style.textAlign)) add('warning', 'text-align', 'start/end 在不同终端表现不一致，复制时会转换。');
+    if (/^justify(-all)?$/i.test(style.textAlign)) add('warning', 'text-align', '两端对齐在各终端解释不一致（安卓与微信编辑器常退化为左对齐），复制时会移除，改用默认对齐。');
     if (/rgba?\([^)]*,\s*0\s*\)|transparent/i.test(style.caretColor)) add('warning', 'caret-color', '透明输入光标会影响编辑，复制时会移除。');
     if (tag === 'img' && getNumericPixels(computed?.opacity || style.opacity || '1') === 0) add('error', 'opacity', '发现 opacity:0 的图片，公众号后台可能无法选中或替换。');
 
@@ -587,7 +591,13 @@ function createWechatHtml(doc: Document) {
     const parentComputed = source.parentElement ? doc.defaultView?.getComputedStyle(source.parentElement) : null;
 
     for (const attribute of Array.from(target.attributes)) {
-      if (/^on/i.test(attribute.name) || ['class', 'id', 'contenteditable', 'spellcheck'].includes(attribute.name)) {
+      // 移除事件属性、样式钩子，以及编辑工具（如画布/预览面板）注入的 data-* 标记。
+      // data-page-node-id 之类是编辑器内部定位节点用的，复制进公众号只会变成噪音属性。
+      if (
+        /^on/i.test(attribute.name) ||
+        /^data-page-node-id$/i.test(attribute.name) ||
+        ['class', 'id', 'contenteditable', 'spellcheck'].includes(attribute.name)
+      ) {
         target.removeAttribute(attribute.name);
       }
     }
@@ -910,10 +920,11 @@ export function EditorWorkspace() {
     try {
       setValidationIssues(validateWechatDocument(doc));
       const result = createWechatHtml(doc);
-      // 最终兜底：确保写进剪贴板的 HTML 不含 start/end 等非标准 text-align（微信规范 1.6）。
+      // 最终兜底：确保写进剪贴板的 HTML 不含 start/end/justify 等各端不一致的 text-align（微信规范 1.6）。
+      // 注意这里直接处理字符串，比 DOM 路径更可靠 —— 万一有值没被 normaliseTextAlign 拦住，这层也能兜住。
       let alignFixed = 0;
       let finalHtml = result.html.replace(
-        /text-align\s*:\s*(start|end|-webkit-left|-webkit-right|-webkit-center|-moz-left|-moz-right|-moz-center)(?![a-z-])/gi,
+        /text-align\s*:\s*(start|end|justify|justify-all|inter-word|inter-character|distribute|-webkit-left|-webkit-right|-webkit-center|-moz-left|-moz-right|-moz-center)(?![a-z-])/gi,
         (_match, value: string) => {
           alignFixed += 1;
           const normalized = normaliseTextAlign(value);
