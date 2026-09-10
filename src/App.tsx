@@ -55,7 +55,8 @@ const STARTER_HTML = `<!doctype html>
 <body>
   <main class="article">
     <div class="eyebrow">本地排版 · 无需登录</div>
-    <h1>把 AI 生成的 HTML<br />直接变成公众号图文</h1>
+    <h1 style="margin:12px 0 18px;color:#18181b;font-size:30px;line-height:1.35;text-align:center;">把 AI 生成的 HTML</h1>
+    <h1 style="margin:0 0 18px;color:#18181b;font-size:30px;line-height:1.35;text-align:center;">直接变成公众号图文</h1>
     <p class="lead">导入、微调、复制，文章只保存在你的电脑里。</p>
     <div class="rule"></div>
     <h2>这是一个可编辑的示例</h2>
@@ -476,6 +477,84 @@ function normaliseWechatTree(root: HTMLElement, sourceDoc: Document) {
   return [...fixes];
 }
 
+// 公众号编辑器对粘贴内容做"白名单清洗"，已知会剥掉三类常见排版：
+//   ① 空 <div> 整段删除 —— 装饰线（.rule 之类的 width/height/background 小元素）会消失
+//   ② <div> 的 background / border-left / box-shadow 经常被过滤 —— 引用块塌成纯文字
+//   ③ 这些 div 的外层样式只对 div 生效，转成白名单里的 <blockquote> / <hr> 后才能稳定保留
+// 这一步把这类 div 转成更"语义化"的白名单标签，把视觉样式搬到新标签上。
+function adaptForWechatEditor(root: HTMLElement): string[] {
+  const fixes = new Set<string>();
+
+  // 公众号把标题里的 <br> 解释为"段落分隔"，导致第二段失去原标题样式（字号、字重、对齐）。
+  // 拆成两个独立标题可确保样式完整继承。
+  root.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6').forEach((heading) => {
+    const brs = Array.from(heading.querySelectorAll('br'));
+    if (brs.length === 0) return;
+    for (const br of brs) {
+      const following: Node[] = [];
+      let next: Node | null = br.nextSibling;
+      while (next) {
+        following.push(next);
+        next = next.nextSibling;
+      }
+      if (following.length === 0) {
+        br.remove();
+        continue;
+      }
+      const second = document.createElement(heading.tagName);
+      second.style.cssText = heading.style.cssText;
+      following.forEach((node) => second.appendChild(node));
+      heading.parentNode?.insertBefore(second, heading.nextSibling);
+      br.remove();
+      fixes.add('标题换行拆分');
+    }
+  });
+
+  // ① 含 border-left 且 width ≥ 3px 的 div 转 <blockquote>（公众号白名单里的引用语义）
+  root.querySelectorAll<HTMLElement>('div').forEach((div) => {
+    if (!div.textContent?.trim()) return;
+    const s = div.style;
+    const borderLeftWidth = parseFloat(s.borderLeftWidth);
+    if (!Number.isFinite(borderLeftWidth) || borderLeftWidth < 3) return;
+    if (s.borderLeftStyle !== 'solid') return;
+    const bq = document.createElement('blockquote');
+    bq.style.cssText = div.style.cssText;
+    // blockquote 默认带 margin/缩进，统一清零，靠用户的 padding/background 撑住视觉
+    if (!s.marginLeft && !s.marginRight) {
+      bq.style.marginLeft = '0';
+      bq.style.marginRight = '0';
+    }
+    if (!s.paddingLeft && !s.paddingRight) {
+      bq.style.paddingLeft = '10px';
+      bq.style.paddingRight = '10px';
+    }
+    bq.innerHTML = div.innerHTML;
+    div.replaceWith(bq);
+    fixes.add('引用块 → blockquote');
+  });
+
+  // ② 小尺寸 + 有背景/圆角的空 div 转 <hr>（公众号白名单里的水平线语义）
+  //    识别条件：完全空 + width/height 都 ≤ 200/30 + 有 background-color 或 border-radius + 宽高比 ≥ 3:1
+  root.querySelectorAll<HTMLElement>('div').forEach((div) => {
+    if (div.textContent?.trim()) return;
+    if (div.querySelector('img, video, audio, br')) return;
+    const s = div.style;
+    const w = parseFloat(s.width);
+    const h = parseFloat(s.height);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return;
+    if (w > 200 || h > 30) return;
+    if (!s.backgroundColor && !s.borderRadius) return;
+    if (w / h < 3 && h / w < 3) return; // 宽高比不极端，不是"线"
+    const hr = document.createElement('hr');
+    hr.style.cssText = s.cssText;
+    hr.style.border = '0'; // 清除 <hr> 默认的 inset border
+    div.replaceWith(hr);
+    fixes.add('装饰线 → hr');
+  });
+
+  return Array.from(fixes);
+}
+
 function createWechatHtml(doc: Document) {
   const sourceBody = doc.body;
   const cloneBody = sourceBody.cloneNode(true) as HTMLElement;
@@ -541,6 +620,9 @@ function createWechatHtml(doc: Document) {
   });
 
   const fixes = normaliseWechatTree(cloneBody, doc);
+  // 公众号后台粘贴的"白名单清洗"会剥掉空 div 与 div 的 background/border，
+  // 把符合模式的目标转成白名单标签（<blockquote>、<hr>）后再包 wrapper。
+  fixes.push(...adaptForWechatEditor(cloneBody));
 
   const wrapper = document.createElement('section');
   wrapper.setAttribute('data-wechat-html-editor', 'true');
