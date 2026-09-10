@@ -6,7 +6,7 @@
 
 ### 直接使用（推荐，零依赖）
 
-双击 `dist\公众号排版助手.html`。
+双击 `dist\index.html`。
 
 - **不需要安装 Node.js**，不需要联网，不需要命令行
 - 整个应用（界面、样式、全部逻辑）都在一个约 320 KB 的 HTML 文件里
@@ -24,7 +24,7 @@ npm run dev
 
 ## 使用步骤
 
-1. 把 AI 生成的 `.html` 文件拖进页面，或点击“导入 HTML”。
+1. 把 AI 生成的 `.html` 文件拖进左侧的“拖入 HTML 文件”区域，或点击该区域选择文件（仅支持 `.html` / `.htm`）。
 2. 在“预览编辑”中直接修改文字；需要时可以使用加粗、斜体和对齐工具。
 3. 点击“复制到公众号”。
 4. 打开微信公众号后台的图文编辑器，直接粘贴。
@@ -63,10 +63,8 @@ src/
   index.css                    Tailwind 主题与自定义变体
   lib/utils.ts                 cn() 类名合并工具
   components/ui/               实际用到的 4 个 UI 组件（Alert / Button / Tabs / Textarea）
-scripts/
-  postbuild.mjs                构建后把产物重命名为便于分发的文件名
 dist/
-  公众号排版助手.html           单文件产物，双击即用
+  index.html                   单文件产物，双击即用
 ```
 
 ## 常用命令
@@ -80,6 +78,6 @@ npm run typecheck   # TypeScript 类型检查
 
 ## 打不开怎么办
 
-- 单文件版：确认 `dist\公众号排版助手.html` 存在；不存在就先执行一次 `npm run build`。
+- 单文件版：确认 `dist\index.html` 存在；不存在就先执行一次 `npm run build`。
 - 开发模式：执行 `npm run dev` 后，命令窗口会输出本地地址；请保持该窗口打开，关闭即停止服务。
 - 单文件版在 `file://` 下打开时，部分浏览器会禁用本地存储，此时编辑与复制仍可用，只是不会自动保存草稿。
