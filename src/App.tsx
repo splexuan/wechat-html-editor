@@ -101,7 +101,8 @@ const EXPLICIT_ONLY_PROPERTIES = new Set([
   'flex-basis', 'flex-direction', 'flex-flow', 'flex-grow', 'flex-shrink', 'flex-wrap', 'gap',
   'grid-auto-columns', 'grid-auto-flow', 'grid-auto-rows', 'grid-column', 'grid-row',
   'grid-template-columns', 'grid-template-rows', 'height', 'inset', 'justify-content', 'justify-items',
-  'justify-self', 'left', 'list-style-position', 'list-style-type', 'max-height', 'max-width', 'min-height',
+  'justify-self', 'left', 'list-style-position', 'list-style-type', 'margin-bottom', 'margin-left',
+  'margin-right', 'margin-top', 'max-height', 'max-width', 'min-height',
   'min-width', 'object-fit', 'object-position', 'opacity', 'order', 'overflow', 'overflow-wrap', 'overflow-x',
   'overflow-y', 'position', 'right', 'row-gap', 'table-layout', 'text-align', 'text-overflow', 'top',
   'transform', 'transform-origin', 'vertical-align', 'visibility', 'white-space', 'width', 'word-break',
@@ -132,17 +133,131 @@ type ValidationIssue = {
 
 type IconName = 'align-center' | 'align-left' | 'align-right' | 'bold' | 'check' | 'clipboard' | 'code' | 'download' | 'file' | 'italic' | 'laptop' | 'redo' | 'reset' | 'shield' | 'trash' | 'undo' | 'upload';
 
-// 公众号官方提供的“豁免”属性：作者显式标记后，后台算法会跳过对应检查。
-// 我们这套工具作为“复制前的预检 + 清洗”，必须与官方保持一致 —— 命中豁免的元素：
-//   ① 校验阶段不报问题（否则会让作者以为自己写错了）；
-//   ② 复制清洗阶段不动它的相关样式；
-//   ③ 最关键的是属性本身要原样保留进剪贴板，正是它让公众号后台放行。
-// data-ignore-width：跳过宽度/居中/溢出校验；data-ignore-dm / data-no-dark：跳过深色模式改写。
+// 公众号官方"豁免"属性（规范 1.4.4 / 4.5.1 / 4.6）：作者显式标记后，后台校验与转换算法会放行。
+// 我们这套工具作为"复制前的预检 + 清洗"，必须与官方保持同一语义，否则会出现"我们报了错、但粘过去其实没问题"的割裂感。
+// 命中豁免的元素：校验层不报问题；清洗层不动它的相关样式；属性本身必须原样进剪贴板（正是它让后台放行）。
+//
+// ⚠️ 三者生效范围不同，这是实现上最容易出错的地方：
+//   data-ignore-width —— 节点 + 全部后代（子树级），官方用 closest 向上查找
+//   data-ignore-dm    —— 仅当前节点（后代仍会被检测）
+//   data-no-dark      —— 仅当前节点（后代含内联样式仍会转换）
 const WECHAT_EXEMPT_ATTRIBUTES = ['data-ignore-width', 'data-ignore-dm', 'data-no-dark'] as const;
 
-function hasExemption(element: Element, attribute: string) {
-  // 官方语义是整个子树生效，因此用 closest 向上查找，元素自身命中即可。
-  return element.closest(`[${attribute}]`) !== null;
+// `data-ignore-dm` 的官方取值（可多选，空格分隔）
+const IGNORE_DM_LOW_CONTRAST = 'low-contrast';       // 跳过「文字与背景对比度过低」
+const IGNORE_DM_TEXT_BG_GRADIENT = 'text-bg-gradient'; // 跳过「文字背景使用了渐变」
+
+/** 子树级豁免：官方语义是「该节点及其所有后代」都跳过 width 类检测。 */
+function isWidthExempt(element: Element) {
+  return element.closest('[data-ignore-width]') !== null;
+}
+
+/** 节点级豁免：读取该元素自身声明的 data-ignore-dm 规则集合。 */
+function getIgnoreDmRules(element: Element) {
+  const raw = (element.getAttribute('data-ignore-dm') || '').toLowerCase();
+  return new Set(raw.split(/\s+/).filter(Boolean));
+}
+
+/** 节点级豁免：data-no-dark 仅作用于自身。 */
+function isNoDark(element: Element) {
+  return element.hasAttribute('data-no-dark');
+}
+
+/**
+ * 把规则追加到元素的 data-ignore-dm 上（官方语义：多个规则空格分隔）。
+ * 已存在同类规则时不重复添加，也不会覆盖作者手写的其他规则。
+ */
+function appendIgnoreDm(element: HTMLElement, rule: string) {
+  const rules = getIgnoreDmRules(element);
+  if (rules.has(rule)) return false;
+  rules.add(rule);
+  element.setAttribute('data-ignore-dm', Array.from(rules).join(' '));
+  return true;
+}
+
+// —— 颜色与对比度工具（用于自动判定是否需要 low-contrast 豁免）——
+// 官方 Dark Mode 算法只处理内联样式，因此这里也只看内联值，不依赖渲染测量。
+
+/** 解析 rgb()/rgba()/十六进制颜色为 [r, g, b, a]，无法解析时返回 null。 */
+function parseColor(input: string): [number, number, number, number] | null {
+  const value = input.trim().toLowerCase();
+  if (!value) return null;
+  if (value === 'transparent') return [0, 0, 0, 0];
+
+  const rgbMatch = value.match(/^rgba?\(\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*(?:[,/]\s*([\d.]+%?)\s*)?\)$/);
+  if (rgbMatch) {
+    const alpha = rgbMatch[4] === undefined
+      ? 1
+      : (rgbMatch[4].endsWith('%') ? Number.parseFloat(rgbMatch[4]) / 100 : Number.parseFloat(rgbMatch[4]));
+    return [Number(rgbMatch[1]), Number(rgbMatch[2]), Number(rgbMatch[3]), Number.isFinite(alpha) ? alpha : 1];
+  }
+
+  const hex = value.match(/^#([0-9a-f]{3,8})$/);
+  if (hex) {
+    let h = hex[1];
+    if (h.length === 3 || h.length === 4) h = h.split('').map((c) => c + c).join('');
+    if (h.length === 6 || h.length === 8) {
+      return [
+        Number.parseInt(h.slice(0, 2), 16),
+        Number.parseInt(h.slice(2, 4), 16),
+        Number.parseInt(h.slice(4, 6), 16),
+        h.length === 8 ? Number.parseInt(h.slice(6, 8), 16) / 255 : 1,
+      ];
+    }
+  }
+  return null;
+}
+
+/** 相对亮度（WCAG 2.x）。 */
+function relativeLuminance([r, g, b]: [number, number, number, number]) {
+  const channel = (v: number) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+}
+
+/** WCAG 对比度（1 ~ 21）。任一颜色无法解析时返回 null。 */
+function contrastRatio(foreground: string, background: string) {
+  const fg = parseColor(foreground);
+  const bg = parseColor(background);
+  if (!fg || !bg) return null;
+  const l1 = relativeLuminance(fg);
+  const l2 = relativeLuminance(bg);
+  const [light, dark] = l1 > l2 ? [l1, l2] : [l2, l1];
+  return (light + 0.05) / (dark + 0.05);
+}
+
+/**
+ * 沿祖先链找出第一个"有实色背景"的颜色，作为对比度计算的底色。
+ * 只看内联 background-color / background，与官方算法保持一致（它同样不解析外部样式表）。
+ * 渐变背景无法给出确定底色，遇到时返回 null 交由渐变的豁免分支处理。
+ */
+function resolveBackdropColor(element: Element): string | null {
+  let current: Element | null = element;
+  while (current) {
+    const style = (current as HTMLElement).style;
+    if (style) {
+      if (/gradient\(/i.test(style.backgroundImage || '')) return null;
+      const color = style.backgroundColor || '';
+      const parsed = color ? parseColor(color) : null;
+      if (parsed && parsed[3] > 0) return color;
+      // background 简写里也可能带颜色，浏览器通常已物化到 backgroundColor，这里兜一层
+      const shorthand = style.getPropertyValue('background');
+      if (shorthand && /^[#a-z]|rgb/i.test(shorthand.trim())) {
+        const shorthandColor = parseColor(shorthand.trim());
+        if (shorthandColor && shorthandColor[3] > 0) return shorthand.trim();
+      }
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+/** 判断元素是否带渐变背景（background 或 background-image 含 linear/radial-gradient）。 */
+function hasGradientBackground(element: HTMLElement) {
+  const style = element.style;
+  return /gradient\(/i.test(`${style.backgroundImage || ''} ${style.getPropertyValue('background') || ''}`);
 }
 
 const ICON_PATHS: Record<IconName, string> = {
@@ -228,6 +343,7 @@ function hasStylesheetProperty(element: Element, property: string) {
     return false;
   };
 
+
   for (const sheet of Array.from(element.ownerDocument.styleSheets)) {
     try {
       if (inspectRules(sheet.cssRules)) return true;
@@ -274,15 +390,15 @@ function normaliseTextAlign(value: string) {
   const align = value.trim().toLowerCase();
   if (!align) return '';
   if (['left', 'right', 'center'].includes(align)) return align;
-  // justify / justify-all：注意这不是“官方非标准值” —— 公众号规范只把 start/end 列为非标准。
-  // 之所以仍然移除，是因为两端对齐在各终端的实现不一致：iOS 会真两端对齐，安卓与微信编辑器
-  // 常退化成左对齐，中文正文还会出现标点挤压、字距被拉开的空隙。
-  // 中文正文极少需要两端对齐，统一移除、交给默认左对齐，换取多端表现一致。
-  if (align === 'justify' || align === 'justify-all' || align === 'inter-word' || align === 'inter-character' || align === 'distribute') return '';
+  // 官方规范 1.6 只把 start / end 列为错误值：不同终端兼容性差异会导致部分设备居中、部分居左。
+  // 这两个转换成等价的标准值，语义不变。
   if (/^(start|-webkit-left|-moz-left)$/.test(align)) return 'left';
   if (/^(end|-webkit-right|-moz-right)$/.test(align)) return 'right';
   if (/^(-webkit-center|-moz-center)$/.test(align)) return 'center';
-  return '';
+  // justify / inter-word / distribute 等：官方规范**没有**把它们列为错误值。
+  // 早期版本会在这里返回空字符串（即删除），属于过度处理 —— 作者写了两端对齐就被我们改掉了，
+  // 这正是"本地预览与公众号不一致"的来源之一。现在改为原样保留，交给公众号按自己的规则渲染。
+  return align;
 }
 
 function redundantNestingDepth(element: Element) {
@@ -315,21 +431,7 @@ function getDeclaredExtraWidth(element: HTMLElement) {
 }
 
 // 从元素自身向上逐层累加：固定像素宽度取原值，其余按 0 计（无宽度约束的祖先不贡献需求）。
-// 返回沿链的最大"最小所需宽度"，用于判断是否存在深层嵌套导致的必然溢出。
-function getRequiredWidth(element: HTMLElement) {
-  let required = 0;
-  let current: HTMLElement | null = element;
-  while (current) {
-    const own = getNumericPixels(current.style.width);
-    const extra = getDeclaredExtraWidth(current);
-    if (own > 0) required = Math.max(required, own + extra);
-    else required = Math.max(required, extra);
-    current = current.parentElement;
-  }
-  return required;
-}
-
-// 判断元素是否处在"固定宽度比自己窄"的祖先容器中 —— 这种必然溢出，但 getBoundingClientRect 量不出来。
+// 文本换行空间推算：容器固定宽度扣掉水平内边距与边框后，是否小到排不下一个汉字。
 function hasCrampedTextWidth(element: HTMLElement) {
   const width = getNumericPixels(element.style.width);
   if (!width) return false;
@@ -366,13 +468,10 @@ function validateWechatDocument(doc: Document): ValidationIssue[] {
     const computed = doc.defaultView?.getComputedStyle(element);
     const tag = element.tagName.toLowerCase();
 
-    if (style.getPropertyValue('font-family')) add('warning', '字体', '检测到自定义 font-family，复制时会移除并使用公众号官方默认字体栈。');
-    if (style.getPropertyPriority('color') === 'important' || style.cssText.includes('!important')) add('warning', '!important', '检测到 !important，复制时会移除优先级。');
-    // 官方规范（#2.6 text-align）只将 start/end 判为非标准值 —— 这两个是给多语言书写方向用的，
-    // 在中文终端上会退化成左/右对齐，因此复制时转换成 left/right。
-    if (/^(start|end)$/i.test(style.textAlign)) add('warning', 'text-align', 'start/end 是给多语言书写方向的值，中文终端会退化为左/右对齐；复制时会转为 left/right。');
-    // justify 不在官方非标准值名单里，特此说明真实原因，避免与 start/end 混为一谈。
-    if (/^justify(-all)?$/i.test(style.textAlign)) add('warning', 'text-align 两端对齐', '两端对齐不属于官方非标准值，但各端渲染不一致（iOS 会两端对齐，安卓与微信编辑器常退化为左对齐，中文还会出现标点挤压）；复制时会移除、改用默认对齐。');
+    if (style.getPropertyValue('font-family')) add('warning', '字体', '检测到自定义 font-family，复制时会移除并使用公众号官方默认字体栈（规范第 3 章：不建议自定义字体）。');
+    if (style.getPropertyPriority('color') === 'important' || style.cssText.includes('!important')) add('warning', '!important', '检测到 !important，复制时会移除优先级（规范 4.5.2：会让平台公共样式与深色模式算法失效）。');
+    // 官方规范 1.6 只把 start / end 判为错误值，复制时转成等价的 left / right。
+    if (/^(start|end)$/i.test(style.textAlign)) add('warning', 'text-align', 'start/end 在不同终端兼容性有差异（部分设备居中、部分居左）；复制时会转为 left/right，视觉等价。');
     if (/rgba?\([^)]*,\s*0\s*\)|transparent/i.test(style.caretColor)) add('warning', 'caret-color', '透明输入光标会影响编辑，复制时会移除。');
     if (tag === 'img' && getNumericPixels(computed?.opacity || style.opacity || '1') === 0) add('error', 'opacity', '发现 opacity:0 的图片，公众号后台可能无法选中或替换。');
 
@@ -388,34 +487,34 @@ function validateWechatDocument(doc: Document): ValidationIssue[] {
       if (/hidden|clip/.test(computed.overflowY) && element.scrollHeight > element.clientHeight + 2) {
         add('error', 'height', '文字超出固定高度容器并被裁剪。');
       }
-      if (/gradient\(/i.test(computed.backgroundImage) && !hasExemption(element, 'data-no-dark') && !hasExemption(element, 'data-ignore-dm')) {
-        add('warning', 'Dark Mode', '文字使用渐变背景，深色模式可能将它转换为纯色。');
+    }
+
+    // 深色模式（规范 4.1.1 / 4.1.2 / 4.6）：复制时我们会自动补 data-ignore-dm 保住原样，
+    // 但作者若已手动声明过同类规则，就无需重复提示。
+    {
+      const dmRules = getIgnoreDmRules(element);
+      if (hasGradientBackground(element) && hasVisibleText(element)
+        && !dmRules.has(IGNORE_DM_TEXT_BG_GRADIENT) && !isNoDark(element)) {
+        add('warning', 'Dark Mode 渐变', '文字背景使用了渐变，深色模式下会被混合成纯色；复制时会自动添加 data-ignore-dm="text-bg-gradient" 保留原样。');
+      }
+      const ownColor = style.color;
+      if (ownColor && hasVisibleText(element)
+        && !dmRules.has(IGNORE_DM_LOW_CONTRAST) && !isNoDark(element)) {
+        const backdrop = resolveBackdropColor(element);
+        const ratio = backdrop ? contrastRatio(ownColor, backdrop) : null;
+        if (ratio !== null && ratio < 3) {
+          add('warning', 'Dark Mode 对比度', `文字与背景对比度约 ${ratio.toFixed(1)}:1（偏低），深色模式会调整该颜色；复制时会自动添加 data-ignore-dm="low-contrast" 保留原样。`);
+        }
       }
     }
 
-    // 规范 1.4：宽度/居中/溢出类问题。作者可用 data-ignore-width 显式豁免（官方语义为整个子树生效）。
-    if (!hasExemption(element, 'data-ignore-width') && computed) {
-      const bodyRect = doc.body.getBoundingClientRect();
-      const rect = element.getBoundingClientRect();
-      if (rect.width > bodyRect.width + 2 || rect.right > bodyRect.right + 2 || rect.left < bodyRect.left - 2) {
-        add('error', 'width', '存在超出文章可视宽度的内容，复制时会限制最大宽度。如需保留原始尺寸，可在该元素上添加 data-ignore-width。');
-      } else if (isFixedPixelValue(style.width) && getNumericPixels(style.width) > 320 && tag !== 'svg') {
-        add('warning', 'width', '检测到较大的固定像素宽度，窄屏下可能显示不一致。如需保留，可添加 data-ignore-width。');
-      }
-
-      // 静态盲点补位：固定宽度 > 320 的容器，实际渲染测量会被父级裁剪，getBoundingClientRect 量不出溢出。
-      // 这里直接用声明值判断 —— 只要存在固定宽度超过窄屏安全线，就提示一次。
-      if (isFixedPixelValue(style.width) && getNumericPixels(style.width) > 375 && tag !== 'svg' && tag !== 'img') {
-        add('warning', 'width 固定宽度', `此处宽度固定为 ${style.width}，超过一般手机可视宽度（约 375px），窄屏会有横向溢出；复制时会改为 max-width + width:auto，如需保留请加 data-ignore-width。`);
-      }
-
-      // 深层嵌套溢出：元素比最近的固定宽度祖先还宽，必然被裁切。
+    // 规范 1.4：宽度/居中/溢出。复制时会自动为该元素补 data-ignore-width 让后台放行，
+    // 因此"固定宽度"本身不再是问题，只在**确实会被裁切或挤压**时提醒作者。
+    if (!isWidthExempt(element) && computed) {
       const clamped = findClampingAncestor(element as HTMLElement);
       if (clamped) {
-        add('error', 'width 嵌套溢出', `该元素宽 ${style.width}，超出外层固定宽度容器（可用约 ${Math.round(clamped.available)}px），复制后会溢出或被裁切。请改用百分比/auto，或在外层添加 data-ignore-width。`);
+        add('warning', 'width 嵌套溢出', `该元素宽 ${style.width}，超出外层固定宽度容器（可用约 ${Math.round(clamped.available)}px）。复制时会自动补 data-ignore-width 让后台放行，但窄屏下仍可能被裁切，建议改用百分比宽度。`);
       }
-
-      // 文本空间过窄：容器宽度减掉内边距后不到一个汉字宽，文字会被挤压成竖排。
       if (hasVisibleText(element) && hasCrampedTextWidth(element as HTMLElement)) {
         add('error', 'width 文本挤压', '容器固定宽度扣掉内边距后不足以排下一个汉字，正文会逐字换行；请加大宽度或改用 auto。');
       }
@@ -462,50 +561,64 @@ function normaliseWechatTree(root: HTMLElement, sourceDoc: Document) {
       fixes.add('移除光标颜色');
     }
 
-    // 规范 1.4：固定像素宽度（>320）会被微信判定“居中布局不一致”。
-    // 对非 img/svg 的容器，把 width:NNNpx 改写为 max-width:NNNpx; width:auto，
-    // 这样保留设计意图（限制最大宽度）、同时响应式不溢出。
-    // data-ignore-width：作者显式声明“这个尺寸是故意的”，官方后台会放行，我们同样不动。
+    // 规范 1.4.4：不再改写固定宽度，而是保留原样 + 追加官方豁免属性 data-ignore-width。
+    // 早期版本会把 width:900px 改写成 width:auto;max-width:900px —— 那等于擅自改掉了作者的
+    // 设计尺寸，导致"本地预览与公众号不一致"。现在改为信任作者：保留尺寸，用官方通道让后台放行。
+    // 官方语义为子树级（父级标记后后代全部跳过检测），但这里仍给每个写了 px 宽度的节点单独标记：
+    //   ① 更明确地表达"这个尺寸是刻意的"；
+    //   ② 避免作者日后把元素从父容器里挪出来时豁免意外失效。
     if (
-      !hasExemption(element, 'data-ignore-width') &&
       isFixedPixelValue(element.style.width) &&
       tag !== 'svg' &&
       tag !== 'img' &&
-      getNumericPixels(element.style.width) > 320
+      !element.hasAttribute('data-ignore-width')
     ) {
-      const px = element.style.width;
-      if (!element.style.maxWidth) element.style.maxWidth = px;
-      element.style.width = 'auto';
-      element.style.boxSizing = 'border-box';
-      fixes.add('响应式容器');
-    } else if (
-      !hasExemption(element, 'data-ignore-width') &&
-      isFixedPixelValue(element.style.width) &&
-      tag !== 'svg' &&
-      tag !== 'img' &&
-      !element.style.maxWidth
-    ) {
-      element.style.maxWidth = '100%';
-      fixes.add('限制最大宽度');
+      element.setAttribute('data-ignore-width', '');
+      fixes.add('固定宽度豁免');
     }
 
-    // 规范 1.4.2：居中布局在窄屏上偏移导致溢出。
-    // 浏览器会把 margin:0 auto 物化成 margin-left/right:NNNpx（来自父容器剩余空间），
-    // 这会导致窄屏下内容右溢出。把这种“等于的两侧边距”归位为 auto 居中；
-    // 不对称的固定水平边距直接清零，确保响应式安全。豁免元素保持原样。
-    if (tag !== 'svg' && tag !== 'img' && !hasExemption(element, 'data-ignore-width')) {
+    // 规范 1.4.2：非 px 的宽度值（百分比、calc、em 等）镜像成 max-width，
+    // 既保留作者写的 width，又多一层防溢出保护。仅在本节点没有 max-width 时补。
+    if (
+      element.style.width &&
+      !isFixedPixelValue(element.style.width) &&
+      !element.style.maxWidth &&
+      tag !== 'svg' &&
+      tag !== 'img'
+    ) {
+      element.style.maxWidth = element.style.width;
+      fixes.add('宽度防溢出');
+    }
+
+    // 规范 1.4：普惠补 box-sizing:border-box，保证 width 语义一致
+    // （含 border/padding 的总宽），这也是 data-ignore-width 能正确工作的前提。
+    if (
+      element.style.width &&
+      tag !== 'svg' &&
+      tag !== 'img' &&
+      !element.style.boxSizing
+    ) {
+      element.style.boxSizing = 'border-box';
+    }
+
+    // 规范 1.4.2：水平边距防溢出。
+    // margin 已加入 EXPLICIT_ONLY，产物里只会保留作者真正写过的值，不再被浏览器计算值污染。
+    // 这里只做两件事：① 两侧相等（典型是 margin:0 auto 被物化）归位为 auto 居中；
+    //                 ② 单侧固定 px 清零，避免窄屏右溢出。其余情况原样保留。
+    if (tag !== 'svg' && tag !== 'img' && !isWidthExempt(element)) {
       const ml = (element.style.marginLeft || '').trim();
       const mr = (element.style.marginRight || '').trim();
       if (ml || mr) {
         if (isFixedPixelValue(ml) && isFixedPixelValue(mr) && ml === mr) {
           element.style.marginLeft = 'auto';
           element.style.marginRight = 'auto';
-          fixes.add('响应式居中');
-        } else if (isFixedPixelValue(ml) || isFixedPixelValue(mr)) {
-          // 任意一侧是固定 px 都清零，避免窄屏溢出
-          element.style.marginLeft = isFixedPixelValue(ml) ? '0' : element.style.marginLeft;
-          element.style.marginRight = isFixedPixelValue(mr) ? '0' : element.style.marginRight;
-          fixes.add('响应式边距');
+          fixes.add('居中归位');
+        } else if (isFixedPixelValue(ml) && !mr) {
+          element.style.marginLeft = '0';
+          fixes.add('避免右溢出');
+        } else if (!ml && isFixedPixelValue(mr)) {
+          element.style.marginRight = '0';
+          fixes.add('避免左溢出');
         }
       }
     }
@@ -514,6 +627,23 @@ function normaliseWechatTree(root: HTMLElement, sourceDoc: Document) {
     if (hasVisibleText(element) && /^0(?:\.0+)?px$/i.test(element.style.height || '')) {
       element.style.removeProperty('height');
       fixes.add('移除零高度');
+    }
+
+    // 规范 4.1.2 / 4.6：文字叠加在渐变背景上时，深色模式算法会先 mix 成纯色再转换。
+    // 自动补 data-ignore-dm="text-bg-gradient" 保住渐变原样（官方认可的通关姿势）。
+    // ⚠️ data-ignore-dm 只对当前节点生效，父子需各自标记 —— 这也是 135 父子都贴的原因。
+    if (hasGradientBackground(element) && hasVisibleText(element) && !isNoDark(element)) {
+      if (appendIgnoreDm(element, IGNORE_DM_TEXT_BG_GRADIENT)) fixes.add('渐变深色豁免');
+    }
+
+    // 规范 4.1.1 / 4.6：文字与背景对比度过低时算法会改写颜色。
+    // 用 WCAG 对比度静态推算（不依赖渲染测量），低于 3:1 就补 low-contrast 豁免。
+    if (element.style.color && hasVisibleText(element) && !isNoDark(element)) {
+      const backdrop = resolveBackdropColor(element);
+      const ratio = backdrop ? contrastRatio(element.style.color, backdrop) : null;
+      if (ratio !== null && ratio < 3) {
+        if (appendIgnoreDm(element, IGNORE_DM_LOW_CONTRAST)) fixes.add('低对比度豁免');
+      }
     }
 
     if (element.style.textAlign) {
@@ -532,6 +662,13 @@ function normaliseWechatTree(root: HTMLElement, sourceDoc: Document) {
       if (mapped && !element.style.textAlign) element.style.textAlign = mapped;
       element.removeAttribute('align');
       fixes.add('兼容文字对齐');
+    }
+
+    // 反向镜像（135 编辑器的做法）：把 text-align 的值同步到 align 属性上。
+    // 部分解析器只读 align 属性，双写能提高跨端一致性；值保持原样，不做语义转换。
+    const finalAlign = element.style.textAlign;
+    if (finalAlign && !element.getAttribute('align')) {
+      element.setAttribute('align', finalAlign);
     }
     if (element.tagName === 'IMG') {
       // 规范 1.1：opacity:0 的图片发布后无法在后台选中或替换，强制恢复可见。
@@ -695,10 +832,11 @@ function createWechatHtml(doc: Document) {
     const parentComputed = source.parentElement ? doc.defaultView?.getComputedStyle(source.parentElement) : null;
 
     for (const attribute of Array.from(target.attributes)) {
-      // 移除事件属性、样式钩子，以及编辑工具（如画布/预览面板）注入的 data-* 标记。
-      // data-page-node-id 之类是编辑器内部定位节点用的，复制进公众号只会变成噪音属性。
-      // 例外：WECHAT_EXEMPT_ATTRIBUTES 是官方认可的豁免标记，必须原样带进剪贴板，
-      // 否则公众号后台的宽度/深色模式算法就认不出来了 —— 作者加它就是为了让后台放行。
+      // 移除事件属性、编辑器注入的噪音 data-*，以及会与宿主环境冲突的 id / contenteditable。
+      // 例外一：WECHAT_EXEMPT_ATTRIBUTES 是官方认可的豁免标记，必须原样带进剪贴板，
+      //         否则公众号后台的宽度/深色模式算法就认不出来了 —— 加它就是为了让后台放行。
+      // 例外二：class 保留（与 135 编辑器一致）。公众号后台会剥掉 class，但保留它有两个好处：
+      //         ① 导出的 .html 文件仍可配合样式表使用；② 某些公众号第三方模板靠 class 识别组件。
       if (WECHAT_EXEMPT_ATTRIBUTES.includes(attribute.name.toLowerCase() as (typeof WECHAT_EXEMPT_ATTRIBUTES)[number])) {
         // 官方语义只看属性名是否存在，值无意义 —— 作者写 data-ignore-dm（无值）时浏览器会序列化成
         // data-ignore-dm=""，这是 HTML 规范行为，无需也无法抹掉，原样保留即可。
@@ -706,8 +844,7 @@ function createWechatHtml(doc: Document) {
       }
       if (
         /^on/i.test(attribute.name) ||
-        /^data-page-node-id$/i.test(attribute.name) ||
-        ['class', 'id', 'contenteditable', 'spellcheck'].includes(attribute.name) ||
+        ['id', 'contenteditable', 'spellcheck'].includes(attribute.name) ||
         // 其余 data-* 一律视为工具注入的噪音（豁免属性已在上面放行）。
         /^data-/i.test(attribute.name)
       ) {
@@ -717,11 +854,23 @@ function createWechatHtml(doc: Document) {
 
     if (computed) {
       const rootComputed = doc.documentElement ? doc.defaultView?.getComputedStyle(doc.documentElement) : null;
+      // 居中容器（左右外边距来自 margin:auto）会被浏览器物化成两个相等的像素值，
+      // 例如 margin:0 auto 在 677px 容器里变成 margin-left/right: 54.5px。
+      // 直接写进产物等于把"居中"钉死成某个屏幕宽度的固定偏移，窄屏必然偏移。
+      // 这里先探测一次，命中则把这一对值还原成 auto。
+      const computedMarginLeft = computed.getPropertyValue('margin-left').trim();
+      const computedMarginRight = computed.getPropertyValue('margin-right').trim();
+      const marginAutoRestore =
+        isFixedPixelValue(computedMarginLeft) &&
+        computedMarginLeft === computedMarginRight &&
+        (source as HTMLElement).style?.width !== undefined;
       STYLE_PROPERTIES.forEach((property) => {
         let value = computed.getPropertyValue(property).trim();
         const rootDefault = rootComputed ? rootComputed.getPropertyValue(property).trim() : '';
-        // text-align 非标准值（start/end 等）在此直接归一化，杜绝其进入产物（微信规范 1.6）。
+        // text-align 中只有官方规范 1.6 点名的 start/end 需要归一化（justify 等值原样保留）。
         if (property === 'text-align') value = normaliseTextAlign(value);
+        // margin-left/right 的等值像素对还原为 auto，保持作者「居中」的原意。
+        if (marginAutoRestore && (property === 'margin-left' || property === 'margin-right')) value = 'auto';
         const inheritedFromParent = INHERITED_PROPERTIES.has(property) && parentComputed?.getPropertyValue(property).trim() === value;
         const explicitlySet = 'style' in source && Boolean((source as HTMLElement).style.getPropertyValue(property));
         const authoredGeometry = !EXPLICIT_ONLY_PROPERTIES.has(property) || explicitlySet || hasStylesheetProperty(source, property);
@@ -773,9 +922,11 @@ function createWechatHtml(doc: Document) {
 }
 
 function rewriteResponsiveLayout(input: string): { html: string; changed: boolean; count: number } {
-  // 解析产物 HTML，做两道响应式清理，覆盖 normaliseWechatTree 漏掉的角落：
-  //   ① 非 img/svg 且 width > 320px 的容器改成 max-width + width:auto（规范 1.4.1）
-  //   ② margin-left/right 为固定 px 的容器：相等则归位为 auto 居中；不对称则清零（规范 1.4.2）
+  // 最后一道兜底：直接对产物 HTML 字符串做一次 DOM 解析，补齐 DOM 路径可能漏掉的豁免标记。
+  // ⚠️ 这里**不再改写宽度**。早期版本会把 width>320px 的容器改成 max-width + width:auto，
+  //    那等于擅自改掉作者的设计尺寸，是"本地预览与公众号不一致"的主因。
+  //    官方规范 1.4.4 提供了 data-ignore-width 豁免通道，正确做法是保留尺寸 + 打标记。
+  //    两道兜底：① 固定 px 宽度补 data-ignore-width ② 缺 box-sizing 的补 border-box。
   if (typeof DOMParser === 'undefined') {
     return { html: input, changed: false, count: 0 };
   }
@@ -788,34 +939,18 @@ function rewriteResponsiveLayout(input: string): { html: string; changed: boolea
     root.querySelectorAll<HTMLElement>('*').forEach((element) => {
       const tag = element.tagName.toLowerCase();
       if (tag === 'svg' || tag === 'img') return;
-      // 作者用 data-ignore-width 显式豁免时，宽度与边距原样保留（官方后台同样放行）。
-      if (element.closest('[data-ignore-width]')) return;
       const style = element.style;
-      const rawWidth = (element.getAttribute('style') || '').match(/(?:^|;)\s*width\s*:\s*([^;]+)/i);
-      const width = rawWidth ? rawWidth[1].trim() : '';
-      if (width && isFixedPixelValue(width) && getNumericPixels(width) > 320) {
-        if (!style.maxWidth) style.maxWidth = width;
-        style.width = 'auto';
-        if (!style.boxSizing) style.boxSizing = 'border-box';
+
+      // ① 固定 px 宽度：补官方豁免属性。逐个节点显式标记，不依赖父级的子树级豁免，
+      //    这样即使元素被挪出父容器，豁免也不会意外失效。
+      if (isFixedPixelValue(style.width) && !element.hasAttribute('data-ignore-width')) {
+        element.setAttribute('data-ignore-width', '');
         count += 1;
       }
-      const ml = (style.marginLeft || '').trim();
-      const mr = (style.marginRight || '').trim();
-      if (isFixedPixelValue(ml) && isFixedPixelValue(mr)) {
-        if (ml === mr) {
-          style.marginLeft = 'auto';
-          style.marginRight = 'auto';
-          count += 1;
-        } else {
-          style.marginLeft = '0';
-          style.marginRight = '0';
-          count += 1;
-        }
-      } else if (isFixedPixelValue(ml)) {
-        style.marginLeft = '0';
-        count += 1;
-      } else if (isFixedPixelValue(mr)) {
-        style.marginRight = '0';
+
+      // ② 有宽度但没写 box-sizing 的，补齐 border-box，保证 width 语义与设计一致
+      if (style.width && !style.boxSizing) {
+        style.boxSizing = 'border-box';
         count += 1;
       }
     });
@@ -1035,11 +1170,11 @@ export function EditorWorkspace() {
     try {
       setValidationIssues(validateWechatDocument(doc));
       const result = createWechatHtml(doc);
-      // 最终兜底：确保写进剪贴板的 HTML 不含 start/end/justify 等各端不一致的 text-align（微信规范 1.6）。
-      // 注意这里直接处理字符串，比 DOM 路径更可靠 —— 万一有值没被 normaliseTextAlign 拦住，这层也能兜住。
+      // 最终兜底：只归一化官方规范 1.6 点名的 start/end（justify 等值原样保留）。
+      // 直接处理字符串比 DOM 路径更可靠 —— 万一有值没被 normaliseTextAlign 拦住，这层也能兜住。
       let alignFixed = 0;
       let finalHtml = result.html.replace(
-        /text-align\s*:\s*(start|end|justify|justify-all|inter-word|inter-character|distribute|-webkit-left|-webkit-right|-webkit-center|-moz-left|-moz-right|-moz-center)(?![a-z-])/gi,
+        /text-align\s*:\s*(start|end|-webkit-left|-webkit-right|-webkit-center|-moz-left|-moz-right|-moz-center)(?![a-z-])/gi,
         (_match, value: string) => {
           alignFixed += 1;
           const normalized = normaliseTextAlign(value);
@@ -1048,12 +1183,12 @@ export function EditorWorkspace() {
       );
       if (alignFixed) result.fixes.push(`兼容文字对齐 ×${alignFixed}`);
 
-      // 最终兜底：响应式容器（规范 1.4）。解析产物 DOM，做 width+margin 清理，
-      // 减少被公众号后台判定为“居中布局不一致 / 存在溢出问题”。
+      // 最终兜底：补官方豁免属性（规范 1.4.4）与 box-sizing。
+      // 这里**不再改写宽度** —— 改为保留作者的固定尺寸 + 打 data-ignore-width 标记让后台放行。
       const layoutFixed = rewriteResponsiveLayout(finalHtml);
       if (layoutFixed.changed) {
         finalHtml = layoutFixed.html;
-        if (layoutFixed.count) result.fixes.push(`响应式布局 ×${layoutFixed.count}`);
+        if (layoutFixed.count) result.fixes.push(`宽度豁免 ×${layoutFixed.count}`);
       }
 
       await writeRichClipboard(finalHtml, result.text);
@@ -1220,7 +1355,7 @@ export function EditorWorkspace() {
             ) : <p className="mt-2 text-sm leading-6 text-muted-foreground">文章会按微信官方常见规则检查。</p>}
             {validationIssues.length > 0 && (
               <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
-                点“复制到公众号”时会自动处理：文字对齐 start/end、自定义字体 font-family、<code>!important</code>、大固定宽度、行高叠字等，粘贴后再校验一般不会重复提示。
+                点“复制到公众号”时会自动处理：文字对齐 start/end、自定义字体 font-family、<code>!important</code>、行高叠字等；固定宽度、渐变文字、低对比度会自动加上微信官方豁免属性（<code>data-ignore-width</code> / <code>data-ignore-dm</code>），尽量原样保留不裁切，粘贴后再校验一般不会重复提示。
               </p>
             )}
             <Button variant="outline" className="mt-4 min-h-11 w-full" onClick={runValidation}><Icon name="shield" />重新检查</Button>
