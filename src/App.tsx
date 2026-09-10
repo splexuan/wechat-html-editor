@@ -840,8 +840,8 @@ export function EditorWorkspace() {
 
   const readFile = async (file?: File) => {
     if (!file) return;
-    if (!/\.html?$/i.test(file.name)) {
-      setNotice({ kind: 'error', title: '文件格式不支持', detail: '请选择 .html 或 .htm 文件。' });
+    if (!/\.html?$/i.test(file.name) && !/html/i.test(file.type)) {
+      setNotice({ kind: 'error', title: '文件格式不支持', detail: `「${file.name}」不是 HTML 文件，请选择 .html 或 .htm 文件。` });
       return;
     }
     loadHtml(await file.text(), file.name);
@@ -852,10 +852,20 @@ export function EditorWorkspace() {
     event.target.value = '';
   };
 
-  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+  const handleDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
     setIsDragging(false);
     void readFile(event.dataTransfer.files?.[0]);
+  };
+
+  // 拖拽过程中检测类型：非 HTML 文件时不让"可放置"光标出现，也不高亮拖拽区。
+  const isHtmlFileDrag = (event: DragEvent<HTMLElement>) => {
+    const items = Array.from(event.dataTransfer?.items || []);
+    return items.some((item) => {
+      if (item.kind !== 'file') return false;
+      const file = item.getAsFile();
+      return !file || /\.html?$/i.test(file.name) || /html/i.test(file.type);
+    });
   };
 
   const handleFrameLoad = () => {
@@ -997,7 +1007,6 @@ export function EditorWorkspace() {
             </div>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            <Button variant="outline" size="lg" onClick={() => fileInputRef.current?.click()} className="hidden min-h-11 sm:inline-flex"><Icon name="upload" />导入 HTML</Button>
             <Button size="lg" onClick={() => void copyToWechat()} disabled={isCopying} className="min-h-11 bg-[#b28a2f] px-4 text-white hover:bg-[#94701f]">
               {isCopying ? <Icon name="reset" className="animate-spin" /> : <Icon name="clipboard" />}
               {isCopying ? '正在复制' : '复制到公众号'}
@@ -1020,15 +1029,39 @@ export function EditorWorkspace() {
           </section>
 
           <section
-            className={`rounded-2xl border border-dashed p-4 transition-colors ${isDragging ? 'border-[#b28a2f] bg-[#fbf7ec]' : 'bg-card'}`}
-            onDragEnter={(event) => { event.preventDefault(); setIsDragging(true); }}
-            onDragOver={(event) => event.preventDefault()}
+            role="button"
+            tabIndex={0}
+            aria-label="拖入或点击选择 HTML 文件"
+            className={`group cursor-pointer rounded-2xl border border-dashed p-5 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${isDragging ? 'border-[#b28a2f] bg-[#fbf7ec]' : 'bg-card hover:border-[#b28a2f] hover:bg-[#fbf7ec]/60'}`}
+            onClick={() => fileInputRef.current?.click()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              if (isHtmlFileDrag(event)) setIsDragging(true);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              if (isHtmlFileDrag(event)) {
+                event.dataTransfer.dropEffect = 'copy';
+                setIsDragging(true);
+              } else {
+                event.dataTransfer.dropEffect = 'none';
+              }
+            }}
             onDragLeave={() => setIsDragging(false)}
             onDrop={handleDrop}
           >
-            <Icon name="upload" className="mb-3 size-5 text-[#9a7626]" />
+            <span className={`mx-auto mb-3 grid size-11 place-items-center rounded-xl transition-colors ${isDragging ? 'bg-[#b28a2f] text-white' : 'bg-[#fbf7ec] text-[#9a7626] group-hover:bg-[#b28a2f] group-hover:text-white'}`}>
+              <Icon name="upload" className="size-5" />
+            </span>
             <p className="text-sm font-semibold">拖入 HTML 文件</p>
-            <p className="mt-1 text-sm leading-6 text-muted-foreground">也可以点击顶部“导入 HTML”。文章不会上传。</p>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">或点击此处选择文件，仅支持 .html / .htm</p>
+            <p className="mt-2 text-xs text-muted-foreground">文章不会上传，只在本地处理。</p>
           </section>
 
           <section className="rounded-2xl border bg-[#18181b] p-4 text-white">
