@@ -2,20 +2,25 @@
 
 一个完全在本机运行的 HTML 中转编辑器。它不会上传文章，也不需要登录。
 
-## 两种打开方式
+## 打开方式
 
-### 方式一：单文件版（推荐，零依赖）
+### 直接使用（推荐，零依赖）
 
-双击 `启动公众号排版助手.cmd`，或直接双击 `dist\公众号排版助手.html`。
+双击 `dist\公众号排版助手.html`。
 
 - **不需要安装 Node.js**，不需要联网，不需要命令行
 - 整个应用（界面、样式、全部逻辑）都在一个约 320 KB 的 HTML 文件里
 - 可以直接拷到 U 盘或发给别人，双击就能打开
 - 修改源码后执行 `npm run build` 重新生成
 
-### 方式二：开发模式（需要 Node.js 20.19+）
+### 开发模式（需要 Node.js 20.19+）
 
-双击 `START.cmd`，然后访问 `http://localhost:13580/`。适合改代码时使用，支持热更新。
+```powershell
+npm install
+npm run dev
+```
+
+然后访问 `http://localhost:13580/`。适合改代码时使用，支持热更新。
 
 ## 使用步骤
 
@@ -51,7 +56,7 @@
 
 ```
 index.html                     页面入口（图标已内联为 data URI）
-vite.config.ts                 构建与开发服务器配置
+vite.config.ts                 构建与开发服务器配置（dev 端口 13580）
 src/
   main.tsx                     挂载 React 应用
   App.tsx                      编辑器全部业务逻辑（导入、清洗、内联样式、规范检查、复制）
@@ -59,12 +64,9 @@ src/
   lib/utils.ts                 cn() 类名合并工具
   components/ui/               实际用到的 4 个 UI 组件（Alert / Button / Tabs / Textarea）
 scripts/
-  start-local.mjs              开发模式启动脚本的引导逻辑
-  postbuild.mjs                构建后生成便于分发的单文件名
+  postbuild.mjs                构建后把产物重命名为便于分发的文件名
 dist/
   公众号排版助手.html           单文件产物，双击即用
-START.cmd                      开发模式启动
-启动公众号排版助手.cmd           打开单文件产物
 ```
 
 ## 常用命令
@@ -76,9 +78,8 @@ npm run build       # 构建单文件产物到 dist/
 npm run typecheck   # TypeScript 类型检查
 ```
 
-## 双击没有反应
+## 打不开怎么办
 
 - 单文件版：确认 `dist\公众号排版助手.html` 存在；不存在就先执行一次 `npm run build`。
-- 开发模式：请直接双击英文文件名的 `START.cmd`，避免部分 Windows 环境对中文批处理文件名处理异常。
-- 启动后会出现一个命令窗口，请保持该窗口打开；页面会在服务准备完成后自动打开。
-- 如果无法启动，命令窗口不会自动关闭，而是会显示具体错误。
+- 开发模式：执行 `npm run dev` 后，命令窗口会输出本地地址；请保持该窗口打开，关闭即停止服务。
+- 单文件版在 `file://` 下打开时，部分浏览器会禁用本地存储，此时编辑与复制仍可用，只是不会自动保存草稿。
