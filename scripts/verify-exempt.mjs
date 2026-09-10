@@ -31,6 +31,17 @@ const checks = [
   // 不作恶：不引入 135 的自造属性
   ['未引入 data-darkmode-* 自造属性', /data-darkmode/.test(html) === false],
   ['未引入 class="darkmode" 样式表', /class="darkmode"/.test(html) === false],
+
+  // 「点复制按钮」与「全选复制」产物一致性（回归用例见项目文档/临时验证目录 copy-parity）。
+  // 按钮路径走 getComputedStyle，极易把浏览器隐含推断倒进产物，须固化四道闸门：
+  //   ① border-*-color 默认 currentColor，会跟着 color 凭空造出边框色
+  //   ② 简写（background/margin/padding/font）被炸成多段长串
+  //   ③ 无单位倍数 line-height（1.8）被换算成固定 px
+  //   ④ 简写回填必须取 style 原文，不能取计算值（否则又被重新序列化）
+  ['无凭空推断的边框颜色（currentColor 闸门）', /border-top-color[\s\S]{0,80}border-right-color/.test(html)],
+  ['简写展开表存在（background/margin/padding）', /background-color[\s\S]{0,80}background-image[\s\S]{0,80}background-position/],
+  ['无单位 line-height 不再按 px 比较（存在 /px$/ 判定）', /\/px\$\/i/],
+  ['简写字面量从 style 原文提取（不从计算值回填）', /getAttribute\([`"']style[`"']\)/],
 ];
 
 let failed = 0;

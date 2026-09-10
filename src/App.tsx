@@ -123,6 +123,145 @@ const GEOMETRY_PROPERTY_DEFAULTS: Record<string, string[]> = {
 
 const EMPTY_VALUES = new Set(['', '0px', 'auto', 'none', 'normal', 'rgba(0, 0, 0, 0)', 'transparent', 'visible']);
 
+// ── 「优先取作者声明值」策略 ────────────────────────────────────────────────
+// 这是「点复制按钮样式出错、全选复制却正常」的根因所在。
+//
+// 全选复制时，浏览器直接把作者写在 style="" 里的**原样声明**塞进剪贴板 —— 所见即所得。
+// 而按钮走 createWechatHtml → getComputedStyle，拿到的是**浏览器解析后的计算值**。
+// 计算值会把大量"隐含推断"暴露出来，典型两类污染：
+//   ① border-*-color：作者只写了 border-left 或 color 时，浏览器按 CSS 规则把
+//      border-color 解析为 currentColor，于是 <h1 style="color:#c8a45c"> 凭空多出
+//      border-bottom-color: rgb(200,164,92) 之类 4 条边框颜色 —— 粘到公众号可能真的画出边框。
+//   ② 简写被展开：background:#faf7ef → background:none 0% 0% / auto repeat padding-box
+//      border-box rgb(250,247,239)；line-height:1.8 → 28.8px（固定 px 后不随字号缩放）。
+//
+// 规则：只在作者**确实声明过**该属性（或其简写）时才采用计算值，否则跳过。
+// 判定依据是"作者声明过"而不是"值等于默认值"，因为 many 默认值(如 border-color=currentColor)
+// 无法通过跟根元素比对识别出来。
+
+// 这些属性永远不该被"计算值推断"写入，除非作者显式声明过该属性或其所属简写。
+const DERIVED_ONLY_PROPERTIES = new Set([
+  // 边框四向颜色：默认是 currentColor，会随 color 一起被推断出来，极容易凭空造出边框
+  'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
+  // 字体族：浏览器兜底字体（Times New Roman 等）不该写进产物
+  'font-family',
+]);
+
+// 简写属性 → 它覆盖的长写属性。作者写了简写，等价于声明了这些长写属性。
+const SHORTHAND_EXPANSIONS: Record<string, string[]> = {
+  border: [
+    'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color',
+    'border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style',
+    'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+  ],
+  'border-color': ['border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color'],
+  'border-style': ['border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style'],
+  'border-width': ['border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width'],
+  'border-top': ['border-top-color', 'border-top-style', 'border-top-width'],
+  'border-right': ['border-right-color', 'border-right-style', 'border-right-width'],
+  'border-bottom': ['border-bottom-color', 'border-bottom-style', 'border-bottom-width'],
+  'border-left': ['border-left-color', 'border-left-style', 'border-left-width'],
+  background: ['background-color', 'background-image', 'background-position', 'background-repeat', 'background-size'],
+  margin: ['margin-top', 'margin-right', 'margin-bottom', 'margin-left'],
+  padding: ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'],
+  font: ['font-family', 'font-size', 'font-style', 'font-weight', 'line-height'],
+};
+
+// 作者通过内联 style 声明过的属性集合（含简写展开）。用于判断"计算值能不能信"。
+function getDeclaredStyleProperties(source: Element): Set<string> {
+  const declared = new Set<string>();
+  const inlineStyle = (source as HTMLElement).style;
+  if (!inlineStyle) return declared;
+  for (const property of Array.from(inlineStyle)) {
+    const name = property.toLowerCase();
+    declared.add(name);
+    for (const expanded of SHORTHAND_EXPANSIONS[name] || []) declared.add(expanded);
+  }
+  return declared;
+}
+
+// 作者写了 background 简写时，其下所有长写属性（color/image/position/repeat/size/...）
+// 都应让位 —— 否则先写 background 再补 background-position，浏览器会立刻把简写重新
+// 序列化回 7 段长串，回填等于白做。
+const BACKGROUND_LONGHANDS = new Set([
+  'background-color', 'background-image', 'background-position', 'background-repeat',
+  'background-size', 'background-clip', 'background-origin', 'background-attachment',
+]);
+
+// 从元素 style 属性的**原始文本**里抠出某个属性的字面写法。
+// 为什么不用 element.style.getPropertyValue()：浏览器会把简写重新序列化成它的规范形式，
+// 作者写的 `background:#faf7ef` 会被还原成 `0% 0% / auto repeat padding-box padding-box rgb(...)`，
+// 长度翻几倍还丢掉了原意。要从 style="" 的字符串里做词法提取，才能拿到"作者到底写了什么"。
+function getLiteralInlineDeclaration(element: Element, property: string): string {
+  const raw = element.getAttribute('style') || '';
+  if (!raw) return '';
+  // 按分号切段，但分号可能出现在 url(...) / 引号 / 括号里，需要带嵌套深度与引号状态扫描。
+  const segments: string[] = [];
+  let buffer = '';
+  let depth = 0;
+  let quote = '';
+  for (const char of raw) {
+    if (quote) {
+      buffer += char;
+      if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      buffer += char;
+      continue;
+    }
+    if (char === '(') depth += 1;
+    else if (char === ')') depth = Math.max(0, depth - 1);
+    if (char === ';' && depth === 0) {
+      segments.push(buffer);
+      buffer = '';
+      continue;
+    }
+    buffer += char;
+  }
+  if (buffer) segments.push(buffer);
+
+  for (const segment of segments) {
+    const colon = segment.indexOf(':');
+    if (colon < 0) continue;
+    const name = segment.slice(0, colon).trim().toLowerCase();
+    if (name === property) return segment.slice(colon + 1).trim();
+  }
+  return '';
+}
+
+
+// 固定 px 不随字号缩放：公众号正文基准字号与本工具预览不同，粘过去后行距就会跑偏
+// —— 这正是"按钮复制样式出错"里肉眼最容易看出的一个。
+//
+// 关键：line-height 是可继承属性，浏览器**永远**只报 px（28.8px），拿不到作者写的 1.8。
+// 所以必须沿祖先链回溯，找到最近一个"作者声明了无单位倍数"的节点，
+// 再用当前元素的 font-size 反推这个倍数值 —— 且只在反推结果与计算值吻合时才采用，
+// 否则说明中途有别的元素改写了行高，宁可保留计算值也不能猜错。
+function resolveDeclaredLineHeight(source: Element, computedValue: string, fontSize: string) {
+  let node: Element | null = source;
+  while (node) {
+    const inlineStyle = (node as HTMLElement).style;
+    const declared = inlineStyle?.getPropertyValue('line-height')?.trim() || '';
+    if (declared) {
+      // 只有无单位倍数才还原；px / em / % / normal 等一律保持作者原样（交给计算值）。
+      if (!/^\d*\.?\d+$/.test(declared)) return computedValue;
+      const ratio = Number.parseFloat(declared);
+      const size = Number.parseFloat(fontSize);
+      if (!Number.isFinite(ratio) || ratio <= 0 || !Number.isFinite(size) || size <= 0) return computedValue;
+      // 反推校验：倍数 × 当前字号 应与浏览器算出的 px 基本一致，否则说明继承链被改写，放弃还原。
+      const expected = Math.round(ratio * size * 100) / 100;
+      const actual = Number.parseFloat(computedValue);
+      if (!Number.isFinite(actual) || Math.abs(expected - actual) > 0.5) return computedValue;
+      return declared;
+    }
+    node = node.parentElement;
+  }
+  return computedValue;
+}
+
+
 type Notice = { kind: 'success' | 'warning' | 'error'; title: string; detail: string };
 
 type ValidationIssue = {
@@ -684,8 +823,13 @@ function normaliseWechatTree(root: HTMLElement, sourceDoc: Document) {
     }
     if (hasVisibleText(element)) {
       const fontSize = getNumericPixels(element.style.fontSize);
-      const lineHeight = getNumericPixels(element.style.lineHeight);
-      if (fontSize && lineHeight && lineHeight < fontSize) {
+      // ⚠️ 冒烟线不能直接拿 line-height 的数值跟字号比大小 —— 单位不同！
+      //    无单位倍数（1.8）表示"字号的 1.8 倍"，换算成 px 才是 28.8px；直接比 1.8 < 16
+      //    会误判成"行高小于字号、要叠字"，然后把作者写的 1.8 强行改成 1.5（真实踩过的坑）。
+      //    只有明确带 px 单位的行高才做这个比较。
+      const rawLineHeight = element.style.lineHeight.trim();
+      const lineHeightPx = /px$/i.test(rawLineHeight) ? getNumericPixels(rawLineHeight) : 0;
+      if (fontSize && lineHeightPx && lineHeightPx < fontSize) {
         element.style.lineHeight = '1.5';
         fixes.add('修正文字行高');
       }
@@ -854,6 +998,9 @@ function createWechatHtml(doc: Document) {
 
     if (computed) {
       const rootComputed = doc.documentElement ? doc.defaultView?.getComputedStyle(doc.documentElement) : null;
+      // 作者在内联 style 里真正声明过的属性（含简写展开）。计算值只在这些属性上可信，
+      // 其余一律以作者原意为准 —— 这是与"全选复制"行为对齐的关键。
+      const declaredProperties = getDeclaredStyleProperties(source);
       // 居中容器（左右外边距来自 margin:auto）会被浏览器物化成两个相等的像素值，
       // 例如 margin:0 auto 在 677px 容器里变成 margin-left/right: 54.5px。
       // 直接写进产物等于把"居中"钉死成某个屏幕宽度的固定偏移，窄屏必然偏移。
@@ -867,12 +1014,31 @@ function createWechatHtml(doc: Document) {
       STYLE_PROPERTIES.forEach((property) => {
         let value = computed.getPropertyValue(property).trim();
         const rootDefault = rootComputed ? rootComputed.getPropertyValue(property).trim() : '';
+        // ── 简写回填：作者写 `background:#faf7ef` 时，计算值会把它炸成
+        //    `background: none 0% 0% / auto repeat padding-box border-box rgb(250,247,239)`
+        //    这一长串（7 段式）。公众号后台对超长 background 简写的解析并不稳定，
+        //    而且肉眼也不像作者原本写的东西。这里直接回填作者的简写原文。
+        //    注意：只有当作者**确实**写了这个简写属性时才回填，纯计算出来的不碰。
+        const declaredBackground = getLiteralInlineDeclaration(source, 'background');
+        if (declaredBackground && BACKGROUND_LONGHANDS.has(property)) {
+          // 只在第一个 background 长写属性上写一次简写，其余长写全部跳过，
+          // 否则后续长写会反过来把简写拆回长串。
+          if (property === 'background-color') target.style.setProperty('background', declaredBackground);
+          return;
+        }
         // text-align 中只有官方规范 1.6 点名的 start/end 需要归一化（justify 等值原样保留）。
         if (property === 'text-align') value = normaliseTextAlign(value);
+        // 无单位倍数的 line-height 还原成倍数写法，避免被钉成固定 px 后行距跑偏。
+        if (property === 'line-height') value = resolveDeclaredLineHeight(source, value, computed.fontSize);
         // margin-left/right 的等值像素对还原为 auto，保持作者「居中」的原意。
         if (marginAutoRestore && (property === 'margin-left' || property === 'margin-right')) value = 'auto';
         const inheritedFromParent = INHERITED_PROPERTIES.has(property) && parentComputed?.getPropertyValue(property).trim() === value;
         const explicitlySet = 'style' in source && Boolean((source as HTMLElement).style.getPropertyValue(property));
+        // ⚠️ 关键闸门：这些属性只认"作者声明过的"，绝不用计算值推断。
+        //    border-*-color 默认 currentColor，会跟着 color 被凭空推断出来（凭空造出 4 条边框）；
+        //    font-family 会把浏览器兜底字体（Times New Roman）写进产物。
+        //    这两种污染正是"按钮复制样式出错、全选复制正常"的差异来源。
+        if (DERIVED_ONLY_PROPERTIES.has(property) && !explicitlySet && !declaredProperties.has(property) && !hasStylesheetProperty(source, property)) return;
         const authoredGeometry = !EXPLICIT_ONLY_PROPERTIES.has(property) || explicitlySet || hasStylesheetProperty(source, property);
         // 归一化后为空（未知/非法 text-align 值）时视为无样式，不写入。
         if (property === 'text-align' && value === '') return;

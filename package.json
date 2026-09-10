@@ -10,7 +10,8 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "verify": "node scripts/verify-exempt.mjs"
+    "verify": "node scripts/verify-exempt.mjs",
+    "verify:parity": "node scripts/verify-copy-parity.mjs"
   },
   "dependencies": {
     "@base-ui/react": "1.7.0",
