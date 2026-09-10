@@ -552,6 +552,24 @@ function adaptForWechatEditor(root: HTMLElement): string[] {
     fixes.add('装饰线 → hr');
   });
 
+  // ③ 公众号编辑器（新版底层是 ProseMirror）的白名单里没有 div / main / article 等容器标签，
+  //    粘贴时会把这类标签"整段吞掉"，连带内联的 color / text-align 一起丢失，只剩纯文字
+  //    —— 同一份产物里 <p> 的样式能保留、<div> 的不能，根因就在这里。
+  //    统一换成白名单内、且支持嵌套的 <section>：视觉与 div 完全一致（同为无默认样式的块级元素），
+  //    样式则可完整保留。
+  //    注意必须由内向外处理（reverse），否则外层先被替换后，内层元素会脱离文档而漏转。
+  const NON_WHITELIST_CONTAINERS = [
+    'div', 'main', 'article', 'aside', 'header', 'footer', 'nav',
+    'figure', 'figcaption', 'address', 'hgroup', 'fieldset', 'center', 'dl', 'dt', 'dd',
+  ];
+  Array.from(root.querySelectorAll<HTMLElement>(NON_WHITELIST_CONTAINERS.join(','))).reverse().forEach((element) => {
+    const section = document.createElement('section');
+    section.style.cssText = element.style.cssText;
+    section.innerHTML = element.innerHTML;
+    element.replaceWith(section);
+    fixes.add('容器 → section');
+  });
+
   return Array.from(fixes);
 }
 
@@ -635,7 +653,7 @@ function rewriteResponsiveLayout(input: string): { html: string; changed: boolea
   // 解析产物 HTML，做两道响应式清理，覆盖 normaliseWechatTree 漏掉的角落：
   //   ① 非 img/svg 且 width > 320px 的容器改成 max-width + width:auto（规范 1.4.1）
   //   ② margin-left/right 为固定 px 的容器：相等则归位为 auto 居中；不对称则清零（规范 1.4.2）
-  if (typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') {
+  if (typeof DOMParser === 'undefined') {
     return { html: input, changed: false, count: 0 };
   }
   try {
@@ -677,8 +695,10 @@ function rewriteResponsiveLayout(input: string): { html: string; changed: boolea
       }
     });
     if (!count) return { html: input, changed: false, count: 0 };
-    const serializer = new XMLSerializer();
-    return { html: serializer.serializeToString(root), changed: true, count };
+    // 只取内层内容：`#__root__` 只是解析用的临时包裹，整体序列化会把它（连同 xmlns 与 id）
+    // 一起写进剪贴板 —— 而 div 正是公众号会整段吞掉的标签。
+    // 这里用 innerHTML 与 createWechatHtml 的序列化方式保持一致，避免混入 xmlns 等 XML 残留。
+    return { html: root.innerHTML, changed: true, count };
   } catch {
     return { html: input, changed: false, count: 0 };
   }
