@@ -42,6 +42,12 @@ const checks = [
   ['简写展开表存在（background/margin/padding）', /background-color[\s\S]{0,80}background-image[\s\S]{0,80}background-position/],
   ['无单位 line-height 不再按 px 比较（存在 /px$/ 判定）', /\/px\$\/i/],
   ['简写字面量从 style 原文提取（不从计算值回填）', /getAttribute\([`"']style[`"']\)/],
+
+  // 交付物洁净度：构建产物绝不能带编辑器/预览面板注入的标记。
+  // index.html（源码入口）一旦被预览面板打开过，会写回 data-page-node-id，
+  // 并经由 Vite 构建模板**传染进 dist 产物** —— 曾真实发生，故设此断言。
+  ['构建产物未被预览面板污染（无 data-page-node-id）', /data-page-node-id/.test(html) === false],
+  ['构建产物为可独立运行的单文件（无外链 script/link）', !/<script[^>]+src=/i.test(html) && !/<link[^>]+rel="stylesheet"[^>]*href=/i.test(html)],
 ];
 
 let failed = 0;
